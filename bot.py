@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 import sqlite3
 from aiogram import Bot, Dispatcher, F
@@ -7,19 +8,17 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, C
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from openai import AsyncOpenAI
+from aiohttp import web
 
 # --- НАСТРОЙКИ ---
 TOKEN = "1780243415:JQQ_RUzI-Gmd08s4kgO6EXghwHfVqbOxLDw"
-# Кастомный эндпоинт Shuzagram для aiogram
 shuzagram_server = TelegramAPIServer.from_base("https://api.shuzagram.com/bot")
 session = AiohttpSession(server=shuzagram_server)
 
-# Настройки для LLM (можешь вставить свой ключ от OpenRouter, Groq или Gemini)
 API_KEY = "ТВОЙ_API_КЛЮЧ_LLM"
 BASE_URL = "https://openrouter.ai/api/v1"  
 MODEL_NAME = "deepseek/deepseek-chat"      
 
-# Инициализация бота с кастомным сервером
 bot = Bot(token=TOKEN, session=session)
 dp = Dispatcher()
 ai_client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
@@ -36,7 +35,6 @@ CREATE TABLE IF NOT EXISTS users (
 """)
 db.commit()
 
-
 def get_user(user_id: int):
     cursor.execute("SELECT affection, history FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
@@ -46,14 +44,11 @@ def get_user(user_id: int):
         return 10, ""
     return row[0], row[1]
 
-
 def update_user(user_id: int, affection: int, history: str):
-    affection = max(0, min(100, affection))  # Удерживаем шкалу в пределах от 0% до 100%
+    affection = max(0, min(100, affection))
     cursor.execute("UPDATE users SET affection = ?, history = ? WHERE user_id = ?", (affection, history, user_id))
     db.commit()
 
-
-# --- РАСЧЁТ РАНГА И ШКАЛЫ СЕРДЕЧЕК ---
 def get_rank_and_bar(affection: int):
     if affection < 20:
         rank = "Незнакомка"
@@ -70,15 +65,12 @@ def get_rank_and_bar(affection: int):
     bar = "🩷" * filled + "🖤" * (10 - filled)
     return rank, bar
 
-
 def status_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💗 Близость и статус", callback_data="check_status")],
         [InlineKeyboardButton(text="🔄 Сбросить диалог", callback_data="reset_chat")]
     ])
 
-
-# --- ГЕНЕРАЦИЯ ОТВЕТА ИИ ---
 async def generate_rp_reply(user_id: int, user_text: str):
     affection, history = get_user(user_id)
     rank, _ = get_rank_and_bar(affection)
@@ -97,7 +89,6 @@ async def generate_rp_reply(user_id: int, user_text: str):
 4. В самом конце своего сообщения ОБЯЗАТЕЛЬНО добавь оценку того, как слова пользователя повлияли на симпатию, строго в формате [DELTA:X], где X — число от -3 до +3 (например: [DELTA:+2] или [DELTA:-1]). Никак иначе этот тег не комментируй.
 """
 
-    # Берём последние 10 реплик для контекста памяти
     lines = [line for line in history.split("\n") if line][-10:]
     messages = [{"role": "system", "content": system_prompt}]
     for line in lines:
@@ -116,7 +107,6 @@ async def generate_rp_reply(user_id: int, user_text: str):
 
     raw_reply = response.choices[0].message.content.strip()
 
-    # Вытаскиваем изменение близости [DELTA:+2] из ответа нейросети
     delta = 0
     match = re.search(r"\[DELTA:([+-]?\d+)\]", raw_reply)
     if match:
@@ -127,12 +117,9 @@ async def generate_rp_reply(user_id: int, user_text: str):
     new_history = "\n".join(lines + [f"U: {user_text}", f"A: {raw_reply}"])
     update_user(user_id, new_affection, new_history)
 
-    # Форматируем звёздочки в HTML-курсив для Telegram
     formatted_reply = re.sub(r"\*(.*?)\*", r"<i>*\1*</i>", raw_reply)
     return formatted_reply, delta, new_affection
 
-
-# --- ОБРАБОТЧИКИ СООБЫТИЙ ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     get_user(message.from_user.id)
@@ -141,7 +128,6 @@ async def cmd_start(message: Message):
         "Ну привет. Не ожидала, что ты заглянешь так скоро... О чём поболтаем?"
     )
     await message.answer(intro, parse_mode="HTML", reply_markup=status_keyboard())
-
 
 @dp.message(Command("status"))
 async def cmd_status(message: Message):
@@ -154,7 +140,6 @@ async def cmd_status(message: Message):
     )
     await message.answer(text, parse_mode="HTML")
 
-
 @dp.callback_query(F.data == "check_status")
 async def cb_status(callback: CallbackQuery):
     affection, _ = get_user(callback.from_user.id)
@@ -166,21 +151,17 @@ async def cb_status(callback: CallbackQuery):
     )
     await callback.answer(text, show_alert=True)
 
-
 @dp.callback_query(F.data == "reset_chat")
 async def cb_reset(callback: CallbackQuery):
     update_user(callback.from_user.id, 10, "")
     await callback.message.answer("🔄 <i>Память очищена, близость сброшена до 10%.</i>", parse_mode="HTML")
     await callback.answer()
 
-
 @dp.message(F.text)
 async def handle_message(message: Message):
-    # Показываем статус печати
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     reply, delta, new_affection = await generate_rp_reply(message.from_user.id, message.text)
 
-    # Красиво добавляем информацию об изменении шкалы внизу сообщения
     if delta > 0:
         reply += f"\n\n<code>[💗 Близость +{delta}% → {new_affection}%]</code>"
     elif delta < 0:
@@ -189,10 +170,27 @@ async def handle_message(message: Message):
     await message.answer(reply, parse_mode="HTML", reply_markup=status_keyboard())
 
 
+# --- ВЕБ-СЕРВЕР ДЛЯ ПРЕДОТВРАЩЕНИЯ ЗАСЫПАНИЯ (Keep-Alive) ---
+async def handle_ping(request):
+    return web.Response(text="I'm alive!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Веб-сервер запущен на порту {port}")
+
+
 async def main():
+    # Запускаем локальный веб-сервер, чтобы хостинг не усыплял приложение
+    asyncio.create_task(start_web_server())
+    
     print("Бот запущен на сервере Shuzagram...")
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
